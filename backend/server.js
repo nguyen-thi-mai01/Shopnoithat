@@ -39,12 +39,10 @@ app.use('/api/cart', cartRoutes);
 app.use('/api/upload', uploadRoutes); // Sử dụng upload route
 
 // --- Serving Static Files ---
-const __dirname = path.resolve(); // Lấy đường dẫn thư mục gốc của project
+const __dirname = path.resolve(); // Ensure __dirname is available in ES modules
 
-// Làm cho thư mục 'uploads' có thể truy cập công khai
-// Ví dụ: /uploads/logo/logo.png sẽ truy cập file trong backend/uploads/logo/logo.png
+// Serve static files from the uploads directory
 app.use('/uploads', express.static(path.join(__dirname, '/backend/uploads')));
-
 // --- Deployment Configuration ---
 if (process.env.NODE_ENV === 'production') {
   // Set thư mục build của frontend làm static folder
@@ -61,11 +59,9 @@ if (process.env.NODE_ENV === 'production') {
   });
 }
 
-
 // --- Error Handling Middleware ---
 app.use(notFound); // Middleware cho lỗi 404 (phải đặt sau các routes)
 app.use(errorHandler); // Middleware xử lý lỗi chung (phải đặt cuối cùng)
-
 
 // --- Start Server ---
 const PORT = process.env.PORT || 5000;

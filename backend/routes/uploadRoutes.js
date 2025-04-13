@@ -1,19 +1,25 @@
 import express from 'express';
-import { uploadFile } from '../controllers/uploadController.js';
-import upload from '../middleware/uploadMiddleware.js'; // Middleware Multer
-import { protect, admin } from '../middleware/authMiddleware.js'; // Bảo vệ nếu cần
+import multer from 'multer';
+import path from 'path';
 
 const router = express.Router();
 
-// Route cho upload 1 ảnh (ví dụ: ảnh đại diện sản phẩm, category)
-// 'image' là tên field trong FormData gửi từ frontend
-router.post('/single', protect, admin, upload.single('image'), uploadFile);
+const storage = multer.diskStorage({
+    destination(req, file, cb) {
+        cb(null, 'uploads/');
+    },
+    filename(req, file, cb) {
+        cb(null, `${Date.now()}-${file.originalname}`);
+    },
+});
 
-// Route cho upload nhiều ảnh (ví dụ: gallery ảnh sản phẩm)
-// 'images' là tên field, 5 là số lượng file tối đa
-router.post('/multiple', protect, admin, upload.array('images', 5), uploadFile);
+const upload = multer({ storage });
 
- // Route cho upload logo (nếu cần)
- router.post('/logo', protect, admin, upload.single('logoImage'), uploadFile);
+router.post('/', upload.single('image'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ message: 'No file uploaded' });
+    }
+    res.json({ path: `/uploads/${req.file.filename}` }); // Return the relative path of the uploaded file
+});
 
 export default router;
