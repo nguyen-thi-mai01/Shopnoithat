@@ -1,7 +1,7 @@
 import express from 'express';
 import dotenv from 'dotenv';
 import cors from 'cors';
-import path from 'path'; // Module path của Node.js
+import path from 'path';
 import connectDB from './config/db.js';
 import { notFound, errorHandler } from './middleware/errorMiddleware.js';
 
@@ -11,22 +11,19 @@ import userRoutes from './routes/userRoutes.js';
 import categoryRoutes from './routes/categoryRoutes.js';
 import productRoutes from './routes/productRoutes.js';
 import cartRoutes from './routes/cartRoutes.js';
-import uploadRoutes from './routes/uploadRoutes.js'; // Import upload route
+import uploadRoutes from './routes/uploadRoutes.js';
+import orderRoutes from './routes/orderRoutes.js'; // Add order routes
 
-dotenv.config(); // Load .env file
+dotenv.config();
 
-connectDB(); // Kết nối tới MongoDB
+connectDB();
 
 const app = express();
 
-// Middleware cho phép nhận JSON body
 app.use(express.json());
-
-// Middleware cho CORS (Cross-Origin Resource Sharing)
-// Cấu hình chi tiết hơn nếu cần (ví dụ chỉ cho phép origin từ frontend)
 app.use(cors());
 
-// --- API Routes ---
+// API Routes
 app.get('/api', (req, res) => {
   res.send('API is running...');
 });
@@ -36,37 +33,31 @@ app.use('/api/users', userRoutes);
 app.use('/api/categories', categoryRoutes);
 app.use('/api/products', productRoutes);
 app.use('/api/cart', cartRoutes);
-app.use('/api/upload', uploadRoutes); // Sử dụng upload route
+app.use('/api/upload', uploadRoutes);
+app.use('/api/orders', orderRoutes); // Add order routes
 
-// --- Serving Static Files ---
-const __dirname = path.resolve(); // Ensure __dirname is available in ES modules
-
-// Serve static files from the uploads directory
+// Serving Static Files
+const __dirname = path.resolve();
 app.use('/uploads', express.static(path.join(__dirname, '/backend/uploads')));
-// --- Deployment Configuration ---
-if (process.env.NODE_ENV === 'production') {
-  // Set thư mục build của frontend làm static folder
-  app.use(express.static(path.join(__dirname, '/frontend/build')));
 
-  // Bất kỳ route nào không phải API sẽ được chuyển hướng về index.html của frontend
+// Deployment Configuration
+if (process.env.NODE_ENV === 'production') {
+  app.use(express.static(path.join(__dirname, '/frontend/build')));
   app.get('*', (req, res) =>
     res.sendFile(path.resolve(__dirname, 'frontend', 'build', 'index.html'))
   );
 } else {
-  // Ở development mode, chỉ cần API
   app.get('/', (req, res) => {
     res.send('API is running in development mode...');
   });
 }
 
-// --- Error Handling Middleware ---
-app.use(notFound); // Middleware cho lỗi 404 (phải đặt sau các routes)
-app.use(errorHandler); // Middleware xử lý lỗi chung (phải đặt cuối cùng)
+// Error Handling Middleware
+app.use(notFound);
+app.use(errorHandler);
 
-// --- Start Server ---
+// Start Server
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () =>
-  console.log(
-    `Server running in ${process.env.NODE_ENV} mode on port ${PORT}`
-  )
+  console.log(`Server running in ${process.env.NODE_ENV} mode on port ${PORT}`)
 );

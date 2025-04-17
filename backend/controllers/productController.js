@@ -4,736 +4,697 @@ import Product from '../models/productModel.js';
 import Category from '../models/categoryModel.js';
 import fs from 'fs';
 import path from 'path';
+import slugify from 'slugify';
+import mongoose from 'mongoose'; // Import mongoose để kiểm tra CastError
 
-// Helper function to create a client-accessible path from the server's original path
+// Helper function to create a client-accessible path
 const getClientImagePath = (serverPath) => {
-  if (!serverPath) return null;
-  // Replace backslashes with forward slashes and remove 'backend/' prefix
-  const normalizedPath = serverPath.replace(/\\/g, '/');
-  const clientPath = normalizedPath.replace(/^backend\//, '');
-  // Ensure it starts with a slash
-  return clientPath.startsWith('/') ? clientPath : '/' + clientPath;
+  if (!serverPath) return null;
+  // Đảm bảo luôn dùng / và loại bỏ prefix không cần thiết (nếu có)
+  const normalizedPath = serverPath.replace(/\\/g, '/');
+  const clientPath = normalizedPath.replace(/^backend\/uploads\//, '/uploads/'); // Thích ứng nếu path lưu có 'backend'
+  return clientPath.startsWith('/') ? clientPath : '/' + clientPath;
 };
 
-// Helper function to get the full server path from the stored original path
-const getServerFullPath = (originalPath) => {
-  if (!originalPath) return null;
-  const __dirname = path.resolve(); // Get current directory
-  return path.join(__dirname, originalPath); // Join with the relative path from model
+// Helper function to get the full server path for file operations
+const getServerFullPath = (relativePath) => {
+  if (!relativePath) return null;
+  const __dirname = path.resolve(); // Lấy thư mục gốc của dự án backend
+  // Đảm bảo relativePath bắt đầu từ gốc uploads nếu cần
+  // Ví dụ: nếu relativePath là '/uploads/products/img.jpg'
+  // path.join sẽ xử lý đúng trên các OS
+  // Nếu relativePath là 'backend/uploads/...' thì cần xử lý thêm nếu __dirname đã là thư mục gốc dự án
+  let finalPath = relativePath;
+  // Chuẩn hóa về dùng path separator của hệ thống cho fs operations
+  finalPath = finalPath.replace(/\//g, path.sep);
+  return path.join(__dirname, finalPath);
+};
+
+// >>> NEU: Helper function to normalize path before saving to DB <<<
+const normalizePathForDB = (filePath) => {
+  if (!filePath) return null;
+  // Luôn lưu dạng dùng '/' và loại bỏ các prefix không mong muốn (vd: 'backend')
+  let normalizedPath = filePath.replace(/\\/g, '/');
+  // Ví dụ: nếu multer lưu path là 'backend/uploads/products/img.jpg'
+  // và bạn muốn lưu '/uploads/products/img.jpg' vào DB
+  if (normalizedPath.startsWith('backend/')) {
+    normalizedPath = normalizedPath.substring('backend'.length);
+  }
+  return normalizedPath.startsWith('/') ? normalizedPath : '/' + normalizedPath;
 };
 
 
 // Helper function to disable expired Flash Sales
 const disableExpiredFlashSales = async () => {
-  try {
-    const now = new Date();
-    await Product.updateMany(
-      {
-        isFlashSale: true,
-        saleEndDate: { $lt: now }, // Find sales that ended before now
-      },
-      {
-        $set: { // Reset flash sale fields
-          isFlashSale: false,
-          discountPercentage: 0,
-          saleStartDate: null,
-          saleEndDate: null,
-          totalFlashSaleSlots: 0,
-          remainingFlashSaleSlots: 0,
-        },
-      }
-    );
-  } catch (error) {
-    console.error('Error disabling expired Flash Sales:', error);
-    // Don't throw error here, just log it, as it's a background task
-  }
+  try {
+    const now = new Date();
+    await Product.updateMany(
+      {
+        isFlashSale: true,
+        saleEndDate: { $lt: now },
+      },
+      {
+        $set: {
+          isFlashSale: false,
+          discountPercentage: 0,
+          saleStartDate: null,
+          saleEndDate: null,
+          totalFlashSaleSlots: 0,
+          remainingFlashSaleSlots: 0,
+        },
+      }
+    );
+  } catch (error) {
+    console.error('Error disabling expired Flash Sales:', error);
+  }
 };
 
-// --- HÀM MỚI ĐỂ LẤY GỢI Ý TÌM KIẾM ---
-// @desc    Fetch product suggestions based on keyword
-// @route   GET /api/products/suggestions
-// @access  Public
+// @desc    Fetch product suggestions based on keyword
+// @route   GET /api/products/suggestions
+// @access  Public
 const getProductSuggestions = asyncHandler(async (req, res) => {
-  const keyword = req.query.keyword ? req.query.keyword.trim() : '';
-  const limit = parseInt(req.query.limit) || 5; // Default limit 5 suggestions
+  const keyword = req.query.keyword ? req.query.keyword.trim() : '';
+  const limit = parseInt(req.query.limit) || 5;
 
-  if (!keyword) {
-    return res.json([]); // Return empty array if no keyword
-  }
+  if (!keyword) {
+    return res.json([]);
+  }
 
-  try {
-    // Find products where name contains the keyword (case-insensitive)
-    const suggestions = await Product.find({
-      name: {
-        $regex: keyword,
-        $options: 'i', // 'i' for case-insensitive
-      },
-    })
-      .limit(limit) // Apply the limit
-      .select('_id name slug image price'); // Select only needed fields
+  try {
+    const suggestions = await Product.find({
+      name: { $regex: keyword, $options: 'i' },
+    })
+      .limit(limit)
+      .select('_id name slug image price'); // Lấy các trường cần thiết
 
-    // Format the results to include client-friendly image paths
-    const formattedSuggestions = suggestions.map((product) => ({
-      _id: product._id,
-      name: product.name,
-      slug: product.slug,
-      image: getClientImagePath(product.image), // Convert image path
-      price: product.price,
-    }));
+    const formattedSuggestions = suggestions.map((product) => ({
+      _id: product._id,
+      name: product.name,
+      slug: product.slug,
+      image: getClientImagePath(product.image), // Dùng helper để format
+      price: product.price,
+    }));
 
-    res.json(formattedSuggestions);
-  } catch (error) {
-    console.error('Error fetching product suggestions:', error);
-    res.status(500).json({ message: 'Lỗi khi lấy gợi ý sản phẩm' });
-  }
+    res.json(formattedSuggestions);
+  } catch (error) {
+    console.error('Error fetching product suggestions:', error);
+    res.status(500).json({ message: 'Lỗi khi lấy gợi ý sản phẩm' });
+  }
 });
-// --- KẾT THÚC HÀM MỚI ---
 
-// @desc    Fetch all products (with filter, sort, pagination)
-// @route   GET /api/products
-// @access  Public
+
+// @desc    Fetch all products (with filter, sort, pagination)
+// @route   GET /api/products
+// @access  Public or Admin
 const getProducts = asyncHandler(async (req, res) => {
-    await disableExpiredFlashSales(); // Check expired sales before fetching
+    await disableExpiredFlashSales(); // Luôn kiểm tra flash sale
 
-    const pageSize = 12; // Products per page
-    const page = Number(req.query.pageNumber) || 1; // Current page number
+    const page = Number(req.query.pageNumber) || Number(req.query.page) || 1;
+    const limit = Number(req.query.limit) || 12;
+    const skip = (page - 1) * limit;
 
-    // Keyword filter for product name
-    const keyword = req.query.keyword
-        ? {
-              name: {
-                  $regex: req.query.keyword,
-                  $options: 'i', // Case-insensitive
-              },
-          }
-        : {};
+    let filters = {};
+    if (req.query.keyword) {
+        filters.name = { $regex: req.query.keyword, $options: 'i' };
+    }
+    if (req.query.category) {
+        const category = await Category.findOne({ slug: req.query.category });
+        if (category) {
+            filters.category = category._id;
+        } else {
+             return res.json({ products: [], page: 1, pages: 0, count: 0, totalProducts: 0, totalPages: 1 });
+        }
+    }
+    const minPrice = req.query['price[gte]'] ? Number(req.query['price[gte]']) : null;
+    const maxPrice = req.query['price[lte]'] ? Number(req.query['price[lte]']) : null;
+    if (minPrice !== null || maxPrice !== null) {
+        filters.price = {};
+        if (minPrice !== null) filters.price.$gte = minPrice;
+        if (maxPrice !== null) filters.price.$lte = maxPrice;
+    }
+    if (req.query.isFlashSale === 'true') {
+        filters.isFlashSale = true;
+        filters.saleStartDate = { $lte: new Date() };
+        filters.saleEndDate = { $gte: new Date() };
+        filters.remainingFlashSaleSlots = { $gt: 0 };
+    }
+     if (req.query.status) {
+        if (req.query.status === 'In Stock') {
+            filters.countInStock = { $gt: 0 };
+        } else if (req.query.status === 'Out of Stock') {
+            filters.countInStock = 0;
+        } else if (req.query.status === 'New Arrival') {
+            const oneMonthAgo = new Date();
+            oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
+            filters.createdAt = { $gte: oneMonthAgo };
+        }
+     }
 
-    // Category filter using slug
-    const categorySlug = req.query.category;
-    let categoryFilter = {};
-    if (categorySlug) {
-        const category = await Category.findOne({ slug: categorySlug });
-        if (category) {
-            categoryFilter = { category: category._id };
-        } else {
-            // If category slug is provided but not found, return no products
-            res.json({ products: [], page: 1, pages: 0, count: 0 });
-            return;
-        }
-    }
+    let sortOptions = { createdAt: -1 };
+    const sortBy = req.query.sortBy;
+    if (sortBy === 'price-asc') sortOptions = { price: 1 };
+    else if (sortBy === 'price-desc') sortOptions = { price: -1 };
+    else if (sortBy === 'latest') sortOptions = { createdAt: -1 };
+    else if (sortBy === 'rating') sortOptions = { rating: -1 };
 
-    // Price range filter
-    const minPrice = req.query['price[gte]'] ? Number(req.query['price[gte]']) : 0;
-    const maxPrice = req.query['price[lte]'] ? Number(req.query['price[lte]']) : Infinity;
-    const priceFilter = { price: { $gte: minPrice, $lte: maxPrice } };
+    try {
+        const count = await Product.countDocuments(filters);
+        const productsFromDB = await Product.find(filters)
+            .populate('category', 'id name slug')
+            .sort(sortOptions)
+            .limit(limit)
+            .skip(skip);
 
-    // Flash Sale filter
-    const flashSaleFilter = req.query.isFlashSale === 'true'
-        ? {
-            isFlashSale: true,
-            saleStartDate: { $lte: new Date() }, // Sale must have started
-            saleEndDate: { $gte: new Date() },   // Sale must not have ended
-            remainingFlashSaleSlots: { $gt: 0 }, // Must have slots left
-        }
-        : {};
+        const products = productsFromDB.map((product) => {
+            const productObj = product.toObject();
+            const isActiveFlashSale = product.isFlashSale && product.saleStartDate <= new Date() && product.saleEndDate >= new Date();
+            const discountedPrice = isActiveFlashSale ? product.price * (1 - product.discountPercentage / 100) : product.price;
+            return {
+                ...productObj,
+                image: getClientImagePath(product.image), // Format path
+                images: product.images ? product.images.map(getClientImagePath).filter(p => p) : [], // Format paths
+                discount: product.discountPercentage,
+                discountedPrice: isActiveFlashSale ? discountedPrice : null,
+                isActiveFlashSale,
+            };
+        });
 
-    // Status filter (In Stock, Out of Stock, New Arrival)
-    let statusFilter = {};
-    if (req.query.status) {
-        if (req.query.status === 'In Stock') {
-            statusFilter = { countInStock: { $gt: 0 } };
-        } else if (req.query.status === 'Out of Stock') {
-            statusFilter = { countInStock: 0 };
-        } else if (req.query.status === 'New Arrival') {
-            const oneMonthAgo = new Date();
-            oneMonthAgo.setMonth(oneMonthAgo.getMonth() - 1);
-            statusFilter = { createdAt: { $gte: oneMonthAgo } }; // Created within the last month
-        }
-    }
+        const totalPages = Math.ceil(count / limit);
 
-    // Combine all filters
-    const filters = { ...keyword, ...categoryFilter, ...priceFilter, ...flashSaleFilter, ...statusFilter };
+        res.json({
+            products,
+            page,
+            pages: totalPages,
+            count,
+            totalProducts: count,
+            totalPages: totalPages
+        });
 
-    // Sorting options
-    let sortOptions = {};
-    const sortBy = req.query.sortBy;
-    if (sortBy === 'price-asc') sortOptions = { price: 1 };
-    else if (sortBy === 'price-desc') sortOptions = { price: -1 };
-    else if (sortBy === 'latest') sortOptions = { createdAt: -1 };
-    else if (sortBy === 'rating') sortOptions = { rating: -1 };
-    else sortOptions = { createdAt: -1 }; // Default sort by latest
-
-    // Get total count for pagination
-    const count = await Product.countDocuments(filters);
-
-    // Fetch products with filters, sorting, and pagination
-    const productsFromDB = await Product.find(filters)
-        .populate('category', 'id name slug') // Populate category details
-        .sort(sortOptions)
-        .limit(pageSize)
-        .skip(pageSize * (page - 1));
-
-    // Format products for the client
-    const products = productsFromDB.map((product) => {
-        const productObj = product.toObject(); // Convert Mongoose document to plain object
-        // Check if the product is currently in an active Flash Sale
-        const isActiveFlashSale =
-            product.isFlashSale &&
-            product.saleStartDate <= new Date() &&
-            product.saleEndDate >= new Date();
-        // Calculate discounted price if it's an active flash sale
-        const discountedPrice = isActiveFlashSale
-            ? product.price * (1 - product.discountPercentage / 100)
-            : product.price;
-
-        return {
-            ...productObj,
-            image: getClientImagePath(product.image), // Main image path for client
-            images: product.images // Additional images path for client
-                ? product.images.map((imgPath) => getClientImagePath(imgPath)).filter((p) => p) // Filter out null paths
-                : [],
-            discount: product.discountPercentage, // Include discount percentage
-            discountedPrice: isActiveFlashSale ? discountedPrice : null, // Include discounted price only if active
-            isActiveFlashSale, // Include flag indicating if flash sale is active
-        };
-    });
-
-    // Send response with products and pagination info
-    res.json({ products, page, pages: Math.ceil(count / pageSize), count });
+    } catch (error) {
+        console.error("Error fetching products:", error);
+        res.status(500).json({ message: "Lỗi máy chủ khi tải sản phẩm." });
+    }
 });
 
-// @desc    Fetch single product by ID or Slug
-// @route   GET /api/products/:idOrSlug
-// @access  Public
+// @desc    Fetch single product by ID or Slug
+// @route   GET /api/products/:idOrSlug
+// @access  Public
 const getProductByIdOrSlug = asyncHandler(async (req, res) => {
-    try {
-        await disableExpiredFlashSales(); // Check expired sales
+  try {
+    await disableExpiredFlashSales();
 
-        const idOrSlug = req.params.idOrSlug;
-        let productFromDB;
+    const idOrSlug = req.params.idOrSlug;
+    let productFromDB;
 
-        // Check if the parameter looks like a MongoDB ObjectId
-        if (idOrSlug.match(/^[0-9a-fA-F]{24}$/)) {
-            // Fetch by ID and populate category and reviews
-            productFromDB = await Product.findById(idOrSlug)
-                .populate('category', 'id name slug')
-                .populate('reviews.user', 'id name'); // Populate user info in reviews
-        } else {
-            // Fetch by slug and populate category and reviews
-            productFromDB = await Product.findOne({ slug: idOrSlug })
-                .populate('category', 'id name slug')
-                .populate('reviews.user', 'id name');
-        }
+    if (idOrSlug.match(/^[0-9a-fA-F]{24}$/)) {
+      productFromDB = await Product.findById(idOrSlug)
+        .populate('category', 'id name slug')
+        .populate('reviews.user', 'id name');
+    } else {
+      productFromDB = await Product.findOne({ slug: idOrSlug })
+        .populate('category', 'id name slug')
+        .populate('reviews.user', 'id name');
+    }
 
-        // If product not found
-        if (!productFromDB) {
-            res.status(404);
-            throw new Error('Sản phẩm không tồn tại');
-        }
+    if (!productFromDB) {
+      res.status(404);
+      throw new Error('Sản phẩm không tồn tại');
+    }
+     if (!productFromDB.category) {
+        console.warn(`Product ${productFromDB._id} has a missing or invalid category reference.`);
+     }
 
-        // Validate if category was populated correctly (handle potential data inconsistency)
-        if (!productFromDB.category) {
-            console.error(`Category not found for product with ID/slug: ${idOrSlug}`);
-            // Maybe return a 500 or handle differently, depending on requirements
-            res.status(400); // Or 500
-            throw new Error('Danh mục của sản phẩm không tồn tại hoặc đã bị xóa.');
-        }
+    const relatedFromDB = productFromDB.category ? await Product.find({
+      category: productFromDB.category._id,
+      _id: { $ne: productFromDB._id },
+    })
+      .limit(4)
+      .select('name slug price image rating numReviews isFlashSale saleStartDate saleEndDate discountPercentage') : [];
 
-        // Fetch related products (same category, different product, limit 4)
-        const relatedFromDB = await Product.find({
-            category: productFromDB.category._id, // Must be in the same category
-            _id: { $ne: productFromDB._id },      // Must not be the same product
-        })
-            .limit(4)
-            .select('name slug price image rating numReviews isFlashSale saleStartDate saleEndDate discountPercentage'); // Select needed fields for related products
+    const productObj = productFromDB.toObject();
+    const isActiveFlashSale = productFromDB.isFlashSale && productFromDB.saleStartDate <= new Date() && productFromDB.saleEndDate >= new Date();
+    const discountedPrice = isActiveFlashSale ? productFromDB.price * (1 - productFromDB.discountPercentage / 100) : productFromDB.price;
+    const product = {
+        ...productObj,
+        image: getClientImagePath(productFromDB.image), // Format path
+        images: productFromDB.images ? productFromDB.images.map(getClientImagePath).filter(p => p) : [], // Format paths
+        discount: productFromDB.discountPercentage,
+        discountedPrice: isActiveFlashSale ? discountedPrice : null,
+        isActiveFlashSale,
+    };
 
-        // Format the main product for the client
-        const productObj = productFromDB.toObject();
-        const isActiveFlashSale =
-            productFromDB.isFlashSale &&
-            productFromDB.saleStartDate <= new Date() &&
-            productFromDB.saleEndDate >= new Date();
-        const discountedPrice = isActiveFlashSale
-            ? productFromDB.price * (1 - productFromDB.discountPercentage / 100)
-            : productFromDB.price;
+     const relatedProducts = relatedFromDB.map((relProd) => {
+        const relProdObj = relProd.toObject();
+        const relIsActiveFlashSale = relProd.isFlashSale && relProd.saleStartDate <= new Date() && relProd.saleEndDate >= new Date();
+        const relDiscountedPrice = relIsActiveFlashSale ? relProd.price * (1 - relProd.discountPercentage / 100) : relProd.price;
+        return {
+            ...relProdObj,
+            image: getClientImagePath(relProd.image), // Format path
+            discount: relProd.discountPercentage,
+            discountedPrice: relIsActiveFlashSale ? relDiscountedPrice : null,
+            isActiveFlashSale: relIsActiveFlashSale,
+        };
+     });
 
-        const product = {
-            ...productObj,
-            image: getClientImagePath(productFromDB.image),
-            images: productFromDB.images
-                ? productFromDB.images.map((imgPath) => getClientImagePath(imgPath)).filter((p) => p)
-                : [],
-            discount: productFromDB.discountPercentage,
-            discountedPrice: isActiveFlashSale ? discountedPrice : null,
-            isActiveFlashSale,
-        };
+    res.json({ ...product, relatedProducts });
 
-        // Format the related products for the client
-        const relatedProducts = relatedFromDB.map((relProd) => {
-            const relProdObj = relProd.toObject();
-            const relIsActiveFlashSale =
-                relProd.isFlashSale &&
-                relProd.saleStartDate <= new Date() &&
-                relProd.saleEndDate >= new Date();
-            const relDiscountedPrice = relIsActiveFlashSale
-                ? relProd.price * (1 - relProd.discountPercentage / 100)
-                : relProd.price;
-
-            return {
-                ...relProdObj,
-                image: getClientImagePath(relProd.image),
-                discount: relProd.discountPercentage,
-                discountedPrice: relIsActiveFlashSale ? relDiscountedPrice : null,
-                isActiveFlashSale: relIsActiveFlashSale,
-            };
-        });
-
-        // Send the main product along with related products
-        res.json({ ...product, relatedProducts });
-
-    } catch (error) {
-        // Log the specific error for debugging
-        console.error(`Error in getProductByIdOrSlug for ${req.params.idOrSlug}:`, error);
-        // Re-throw the error to be caught by the global error handler
-        throw error;
-    }
+  } catch (error) {
+    console.error(`Error fetching product ${req.params.idOrSlug}:`, error);
+    if (error instanceof mongoose.Error.CastError) {
+        res.status(404);
+        throw new Error('Định dạng ID hoặc Slug không hợp lệ');
+    }
+    throw error;
+  }
 });
 
 
-// @desc    Create a product
-// @route   POST /api/products
-// @access  Private/Admin
+// @desc    Create a product
+// @route   POST /api/products
+// @access  Private/Admin
 const createProduct = asyncHandler(async (req, res) => {
-    // Destructure required fields from request body
-    const {
-        name,
-        price,
-        description,
-        category, // Category ID expected
-        quantity, // Renamed from countInStock in input, mapped later
-        isFlashSale,
-        discountPercentage,
-        saleStartDate,
-        saleEndDate,
-        totalFlashSaleSlots,
-        remainingFlashSaleSlots,
-    } = req.body;
+    const {
+        name, price, description, category, quantity,
+        isFlashSale = false, discountPercentage = 0, saleStartDate, saleEndDate, totalFlashSaleSlots = 0
+    } = req.body;
 
-    // Get original image paths from uploaded files (using multer field names)
-    let originalImagePath = null;
-    if (req.files && req.files['image'] && req.files['image'].length > 0) {
-        originalImagePath = req.files['image'][0].path; // Get path from multer
-    }
+    if (!name || !price || !description || !category || quantity === undefined || quantity === null) {
+        res.status(400);
+        throw new Error('Vui lòng cung cấp đầy đủ thông tin bắt buộc: tên, giá, mô tả, danh mục, số lượng.');
+    }
 
-    let originalAdditionalImagePaths = [];
-    if (req.files && req.files['images'] && req.files['images'].length > 0) {
-        originalAdditionalImagePaths = req.files['images'].map((file) => file.path);
-    }
+    const categoryExists = await Category.findById(category);
+    if (!categoryExists) {
+        res.status(400);
+        throw new Error('Danh mục không hợp lệ.');
+    }
 
-    // --- Validation ---
-    if (!originalImagePath) {
-        res.status(400);
-        throw new Error('Ảnh đại diện (Trường: image) là bắt buộc.');
-    }
-    if (!name || !price || !description || !category || quantity === undefined || quantity === null) {
-        res.status(400);
-        throw new Error('Vui lòng điền đầy đủ các trường bắt buộc: Tên, Giá, Mô tả, Danh mục, Số lượng.');
-    }
-    if (isNaN(Number(price)) || Number(price) < 0 || isNaN(Number(quantity)) || Number(quantity) < 0) {
-        res.status(400);
-        throw new Error('Giá và Số lượng phải là số không âm.');
-    }
+    let mainImageOriginalPath = null;
+    let additionalImagesOriginalPaths = [];
 
-    // Flash Sale specific validation
-    if (isFlashSale === 'true' || isFlashSale === true) { // Check both string 'true' and boolean true
-        if (discountPercentage === undefined || discountPercentage === null || isNaN(Number(discountPercentage)) || Number(discountPercentage) < 0 || Number(discountPercentage) > 100) {
-            res.status(400);
-            throw new Error('Phần trăm giảm giá Flash Sale phải là số từ 0 đến 100.');
-        }
-        if (!saleStartDate || !saleEndDate) {
-            res.status(400);
-            throw new Error('Ngày bắt đầu và kết thúc Flash Sale là bắt buộc.');
-        }
-        const startDate = new Date(saleStartDate);
-        const endDate = new Date(saleEndDate);
-        if (isNaN(startDate.getTime()) || isNaN(endDate.getTime()) || startDate >= endDate) {
-            res.status(400);
-            throw new Error('Ngày bắt đầu và kết thúc Flash Sale không hợp lệ hoặc ngày kết thúc phải sau ngày bắt đầu.');
-        }
-        if (totalFlashSaleSlots === undefined || totalFlashSaleSlots === null || isNaN(Number(totalFlashSaleSlots)) || Number(totalFlashSaleSlots) < 0 ||
-            remainingFlashSaleSlots === undefined || remainingFlashSaleSlots === null || isNaN(Number(remainingFlashSaleSlots)) || Number(remainingFlashSaleSlots) < 0 ||
-            Number(totalFlashSaleSlots) < Number(remainingFlashSaleSlots)) {
-            res.status(400);
-            throw new Error('Số suất Flash Sale không hợp lệ (Tổng số suất và số suất còn lại phải là số không âm, và Tổng >= Còn lại).');
-        }
-    }
-    // --- End Validation ---
+    if (req.files) {
+        if (req.files.image && req.files.image[0]) {
+             mainImageOriginalPath = req.files.image[0].path;
+        }
+        if (req.files.images && req.files.images.length > 0) {
+             additionalImagesOriginalPaths = req.files.images.map(file => file.path);
+        }
+    }
 
-    // Create new Product instance
-    const product = new Product({
-        name,
-        price: Number(price),
-        user: req.user._id, // Associate with the logged-in admin user
-        image: originalImagePath, // Store the original path provided by multer
-        images: originalAdditionalImagePaths,
-        category, // Store the category ID
-        countInStock: Number(quantity), // Map 'quantity' from input to 'countInStock'
-        numReviews: 0, // Initialize reviews
-        rating: 0,     // Initialize rating
-        description,
-        // Set Flash Sale fields conditionally
-        isFlashSale: isFlashSale === 'true' || isFlashSale === true,
-        discountPercentage: (isFlashSale === 'true' || isFlashSale === true) ? Number(discountPercentage) : 0,
-        saleStartDate: (isFlashSale === 'true' || isFlashSale === true) ? new Date(saleStartDate) : null,
-        saleEndDate: (isFlashSale === 'true' || isFlashSale === true) ? new Date(saleEndDate) : null,
-        totalFlashSaleSlots: (isFlashSale === 'true' || isFlashSale === true) ? Number(totalFlashSaleSlots) : 0,
-        remainingFlashSaleSlots: (isFlashSale === 'true' || isFlashSale === true) ? Number(remainingFlashSaleSlots) : 0,
-        // slug will be generated automatically by the pre-save hook in the model
-    });
+     let flashSaleData = {};
+     if (isFlashSale === true || isFlashSale === 'true') {
+        if (!discountPercentage || discountPercentage <= 0 || !saleStartDate || !saleEndDate || !totalFlashSaleSlots || totalFlashSaleSlots <= 0) {
+            res.status(400);
+            throw new Error('Flash Sale yêu cầu: % giảm giá > 0, ngày bắt đầu/kết thúc, và số lượng > 0.');
+        }
+        if (new Date(saleEndDate) <= new Date(saleStartDate)) {
+            res.status(400);
+            throw new Error('Ngày kết thúc Flash Sale phải sau ngày bắt đầu.');
+        }
+        flashSaleData = {
+            isFlashSale: true,
+            discountPercentage: Number(discountPercentage),
+            saleStartDate: new Date(saleStartDate),
+            saleEndDate: new Date(saleEndDate),
+            totalFlashSaleSlots: Number(totalFlashSaleSlots),
+            remainingFlashSaleSlots: Number(totalFlashSaleSlots),
+        };
+     } else {
+         flashSaleData = {
+             isFlashSale: false,
+             discountPercentage: 0,
+             saleStartDate: null,
+             saleEndDate: null,
+             totalFlashSaleSlots: 0,
+             remainingFlashSaleSlots: 0,
+         };
+     }
 
-    // Save the product to the database
-    const createdProduct = await product.save();
+    const product = new Product({
+        name,
+        slug: slugify(name, { lower: true, strict: true }),
+        user: req.user._id,
+        price: Number(price),
+        description,
+        category: category,
+        countInStock: Number(quantity),
+        // >>> SỬA Ở ĐÂY: Chuẩn hóa đường dẫn trước khi lưu <<<
+        image: normalizePathForDB(mainImageOriginalPath),
+        images: additionalImagesOriginalPaths.map(normalizePathForDB),
+        // >>> HẾT SỬA <<<
+        ...flashSaleData,
+    });
 
-    // Format the created product for the response
-    const responseProduct = {
-        ...createdProduct.toObject(),
-        image: getClientImagePath(createdProduct.image),
-        images: createdProduct.images
-            ? createdProduct.images.map((p) => getClientImagePath(p)).filter((p) => p)
-            : [],
-        // Recalculate flash sale status for the response just in case creation took time
-        isActiveFlashSale:
-            createdProduct.isFlashSale &&
-            createdProduct.saleStartDate <= new Date() &&
-            createdProduct.saleEndDate >= new Date(),
-        discountedPrice:
-            (createdProduct.isFlashSale &&
-             createdProduct.saleStartDate <= new Date() &&
-             createdProduct.saleEndDate >= new Date())
-            ? createdProduct.price * (1 - createdProduct.discountPercentage / 100)
-            : null, // Only show discountedPrice if active
-        discount: createdProduct.discountPercentage, // Keep discount percentage regardless
-    };
+    try {
+        const createdProduct = await product.save();
 
-    res.status(201).json(responseProduct); // Send 201 Created status and the product data
+        // Format lại path cho client (dù đã chuẩn hóa DB, vẫn nên dùng)
+        const formattedProduct = {
+            ...createdProduct.toObject(),
+            image: getClientImagePath(createdProduct.image),
+            images: createdProduct.images ? createdProduct.images.map(getClientImagePath).filter(p => p) : []
+        };
+        res.status(201).json(formattedProduct);
+    } catch (error) {
+        if (error.code === 11000 || error.name === 'ValidationError') {
+            res.status(400);
+        } else {
+            res.status(500);
+        }
+        console.error("Error creating product:", error);
+        // Cẩn thận khi xóa ảnh nếu tạo lỗi - đảm bảo đường dẫn đúng
+        if(mainImageOriginalPath) fs.unlink(getServerFullPath(normalizePathForDB(mainImageOriginalPath)), (err) => { if(err) console.error("Error deleting main image on create fail:", err)});
+        additionalImagesOriginalPaths.forEach(p => fs.unlink(getServerFullPath(normalizePathForDB(p)), (err) => { if(err) console.error("Error deleting additional image on create fail:", err)}));
+
+        throw new Error(`Không thể tạo sản phẩm: ${error.message}`);
+    }
 });
 
 
-// @desc    Update a product
-// @route   PUT /api/products/:id
-// @access  Private/Admin
+// @desc    Update a product
+// @route   PUT /api/products/:id
+// @access  Private/Admin
 const updateProduct = asyncHandler(async (req, res) => {
-    // Destructure fields from request body
-    const {
-        name,
-        price,
-        description,
-        category,
-        quantity,
-        isFlashSale,
-        discountPercentage,
-        saleStartDate,
-        saleEndDate,
-        totalFlashSaleSlots,
-        remainingFlashSaleSlots,
-    } = req.body;
-
-    // Find the existing product by ID
-    const product = await Product.findById(req.params.id);
-
-    if (!product) {
-        res.status(404);
-        throw new Error('Sản phẩm không tồn tại');
-    }
-
-    // Store old image paths for potential deletion later
-    const oldOriginalImagePath = product.image;
-    const oldOriginalAdditionalImagePaths = product.images || []; // Ensure it's an array
-
-    // Check for new uploaded files
-    let newOriginalImagePath = null;
-    if (req.files && req.files['image'] && req.files['image'].length > 0) {
-        newOriginalImagePath = req.files['image'][0].path;
-    }
-
-    let newOriginalAdditionalImagePaths = [];
-    if (req.files && req.files['images'] && req.files['images'].length > 0) {
-        newOriginalAdditionalImagePaths = req.files['images'].map((file) => file.path);
-    }
-
-    // --- Validation ---
-    // (Similar validation as createProduct, but check if values are provided before validating)
-    if (price !== undefined && (isNaN(Number(price)) || Number(price) < 0)) {
-        res.status(400); throw new Error('Giá phải là số không âm.');
-    }
-    if (quantity !== undefined && (isNaN(Number(quantity)) || Number(quantity) < 0)) {
-         res.status(400); throw new Error('Số lượng phải là số không âm.');
-    }
-
-    const updateIsFlashSale = isFlashSale !== undefined ? (isFlashSale === 'true' || isFlashSale === true) : product.isFlashSale;
-
-    if (updateIsFlashSale) {
-        const finalDiscountPercentage = discountPercentage !== undefined ? Number(discountPercentage) : product.discountPercentage;
-        const finalSaleStartDate = saleStartDate !== undefined ? new Date(saleStartDate) : product.saleStartDate;
-        const finalSaleEndDate = saleEndDate !== undefined ? new Date(saleEndDate) : product.saleEndDate;
-        const finalTotalSlots = totalFlashSaleSlots !== undefined ? Number(totalFlashSaleSlots) : product.totalFlashSaleSlots;
-        const finalRemainingSlots = remainingFlashSaleSlots !== undefined ? Number(remainingFlashSaleSlots) : product.remainingFlashSaleSlots;
-
-        if (isNaN(finalDiscountPercentage) || finalDiscountPercentage < 0 || finalDiscountPercentage > 100) {
-            res.status(400); throw new Error('Phần trăm giảm giá Flash Sale phải là số từ 0 đến 100.');
-        }
-        if (!finalSaleStartDate || !finalSaleEndDate || isNaN(finalSaleStartDate.getTime()) || isNaN(finalSaleEndDate.getTime())) {
-            res.status(400); throw new Error('Ngày bắt đầu và kết thúc Flash Sale là bắt buộc và phải hợp lệ.');
-        }
-        if (finalSaleStartDate >= finalSaleEndDate) {
-            res.status(400); throw new Error('Ngày kết thúc Flash Sale phải sau ngày bắt đầu.');
-        }
-        if (isNaN(finalTotalSlots) || finalTotalSlots < 0 || isNaN(finalRemainingSlots) || finalRemainingSlots < 0 || finalTotalSlots < finalRemainingSlots) {
-            res.status(400); throw new Error('Số suất Flash Sale không hợp lệ (Tổng >= Còn lại, >= 0).');
-        }
-         // Assign validated values
-        product.discountPercentage = finalDiscountPercentage;
-        product.saleStartDate = finalSaleStartDate;
-        product.saleEndDate = finalSaleEndDate;
-        product.totalFlashSaleSlots = finalTotalSlots;
-        product.remainingFlashSaleSlots = finalRemainingSlots;
-    } else {
-        // If turning off Flash Sale, reset fields
-        product.discountPercentage = 0;
-        product.saleStartDate = null;
-        product.saleEndDate = null;
-        product.totalFlashSaleSlots = 0;
-        product.remainingFlashSaleSlots = 0;
-    }
-     product.isFlashSale = updateIsFlashSale;
-    // --- End Validation ---
-
-    // Update product fields if they are provided in the request body
-    product.name = name || product.name;
-    product.price = price !== undefined ? Number(price) : product.price;
-    product.description = description || product.description;
-    product.category = category || product.category; // Update category ID if provided
-    product.countInStock = quantity !== undefined ? Number(quantity) : product.countInStock;
-
-    // Update images if new ones were uploaded
-    let mainImageUpdated = false;
-    if (newOriginalImagePath) {
-        product.image = newOriginalImagePath; // Update with new path
-        mainImageUpdated = true;
-    }
-
-    let additionalImagesUpdated = false;
-    if (newOriginalAdditionalImagePaths.length > 0) {
-        product.images = newOriginalAdditionalImagePaths; // Replace old paths with new ones
-        additionalImagesUpdated = true;
-    }
-
-    // Save the updated product
-    const updatedProduct = await product.save(); // Triggers pre-save hook for slug update
-
-    // --- Delete old images after successful save ---
-    // Delete old main image if a new one was uploaded
-    if (mainImageUpdated && oldOriginalImagePath) {
-        const oldImageFullPath = getServerFullPath(oldOriginalImagePath);
-        if (oldImageFullPath) {
-            fs.unlink(oldImageFullPath, (err) => {
-                // Log error but don't block response if deletion fails (e.g., file already gone)
-                if (err && err.code !== 'ENOENT') { // Ignore 'File not found' errors
-                    console.error(`Lỗi khi xóa ảnh đại diện cũ ${oldOriginalImagePath}:`, err);
-                }
-            });
-        }
-    }
-
-    // Delete all old additional images if new ones were uploaded
-    if (additionalImagesUpdated && oldOriginalAdditionalImagePaths.length > 0) {
-        oldOriginalAdditionalImagePaths.forEach((oldImgPath) => {
-            const oldAdditionalFullPath = getServerFullPath(oldImgPath);
-            if (oldAdditionalFullPath) {
-                fs.unlink(oldAdditionalFullPath, (err) => {
-                    if (err && err.code !== 'ENOENT') {
-                        console.error(`Lỗi khi xóa ảnh phụ cũ ${oldImgPath}:`, err);
-                    }
-                });
-            }
-        });
-    }
-    // --- End deleting old images ---
+    const productId = req.params.id;
+    const {
+        name, price, description, category, quantity,
+        isFlashSale, discountPercentage, saleStartDate, saleEndDate, totalFlashSaleSlots,
+        imagesToDelete
+    } = req.body;
 
 
-    // Format response
-    const responseProduct = {
-         ...updatedProduct.toObject(),
-        image: getClientImagePath(updatedProduct.image),
-        images: updatedProduct.images
-            ? updatedProduct.images.map((p) => getClientImagePath(p)).filter((p) => p)
-            : [],
-        // Recalculate flash sale status for the response
-        isActiveFlashSale:
-            updatedProduct.isFlashSale &&
-            updatedProduct.saleStartDate <= new Date() &&
-            updatedProduct.saleEndDate >= new Date(),
-        discountedPrice:
-            (updatedProduct.isFlashSale &&
-             updatedProduct.saleStartDate <= new Date() &&
-             updatedProduct.saleEndDate >= new Date())
-            ? updatedProduct.price * (1 - updatedProduct.discountPercentage / 100)
-            : null,
-        discount: updatedProduct.discountPercentage,
-    };
+    const product = await Product.findById(productId);
+
+    if (!product) {
+        res.status(404);
+        throw new Error('Sản phẩm không tồn tại');
+    }
+
+    product.name = name || product.name;
+    if (name) {
+        product.slug = slugify(name, { lower: true, strict: true });
+    }
+    product.price = price !== undefined ? Number(price) : product.price;
+    product.description = description || product.description;
+    product.countInStock = quantity !== undefined ? Number(quantity) : product.countInStock;
+
+    if (category) {
+        const categoryExists = await Category.findById(category);
+        if (!categoryExists) {
+            res.status(400);
+            throw new Error('Danh mục không hợp lệ.');
+        }
+        product.category = category;
+    }
+
+    let newMainImageOriginalPath = null;
+    let newAdditionalImagesOriginalPaths = [];
+
+    // Xử lý ảnh chính mới
+    if (req.files && req.files.image && req.files.image[0]) {
+        newMainImageOriginalPath = req.files.image[0].path;
+        const oldMainImageServerPath = getServerFullPath(product.image); // Lấy path cũ để xóa
+        if (oldMainImageServerPath) {
+           fs.unlink(oldMainImageServerPath, (err) => { if(err) console.error("Error deleting old main image:", err)});
+        }
+        // >>> SỬA Ở ĐÂY: Chuẩn hóa ảnh chính mới <<<
+        product.image = normalizePathForDB(newMainImageOriginalPath);
+    }
+
+    // Xử lý ảnh phụ mới
+    if (req.files && req.files.images && req.files.images.length > 0) {
+        newAdditionalImagesOriginalPaths = req.files.images.map(file => file.path);
+        // >>> SỬA Ở ĐÂY: Chuẩn hóa ảnh phụ mới <<<
+        const normalizedNewPaths = newAdditionalImagesOriginalPaths.map(normalizePathForDB);
+        product.images = product.images ? [...product.images, ...normalizedNewPaths] : normalizedNewPaths;
+    }
+
+    // Xử lý xóa ảnh phụ cũ
+    if (imagesToDelete && Array.isArray(imagesToDelete) && imagesToDelete.length > 0) {
+         const clientPathsToDelete = imagesToDelete;
+         const serverPathsToDelete = [];
+         const currentImages = product.images || [];
+
+         product.images = currentImages.filter(serverPathDB => {
+            const clientPath = getClientImagePath(serverPathDB); // So sánh client path
+            if (clientPathsToDelete.includes(clientPath)) {
+                serverPathsToDelete.push(serverPathDB); // Lưu server path để xóa file
+                return false; // Lọc bỏ
+            }
+            return true; // Giữ lại
+         });
+
+         serverPathsToDelete.forEach(serverPathDB => {
+             const fullServerPath = getServerFullPath(serverPathDB); // Lấy đường dẫn tuyệt đối
+             if (fullServerPath) {
+                fs.unlink(fullServerPath, (err) => { if(err) console.error(`Error deleting additional image ${serverPathDB}:`, err)});
+             }
+         });
+    }
 
 
-    res.json(responseProduct);
+    const isFlashSaleBool = String(isFlashSale).toLowerCase() === 'true';
+    if (isFlashSaleBool) {
+        if (!discountPercentage || discountPercentage <= 0 || !saleStartDate || !saleEndDate || !totalFlashSaleSlots || totalFlashSaleSlots <= 0) {
+            res.status(400);
+            throw new Error('Cập nhật Flash Sale yêu cầu: % giảm giá > 0, ngày bắt đầu/kết thúc, và số lượng > 0.');
+        }
+        if (new Date(saleEndDate) <= new Date(saleStartDate)) {
+            res.status(400);
+            throw new Error('Ngày kết thúc Flash Sale phải sau ngày bắt đầu.');
+        }
+        product.isFlashSale = true;
+        product.discountPercentage = Number(discountPercentage);
+        product.saleStartDate = new Date(saleStartDate);
+        product.saleEndDate = new Date(saleEndDate);
+        product.totalFlashSaleSlots = Number(totalFlashSaleSlots);
+        product.remainingFlashSaleSlots = Number(totalFlashSaleSlots); // Reset lại? Cần xem xét kỹ logic
+     } else {
+        product.isFlashSale = false;
+        product.discountPercentage = 0;
+        product.saleStartDate = null;
+        product.saleEndDate = null;
+        product.totalFlashSaleSlots = 0;
+        product.remainingFlashSaleSlots = 0;
+     }
+
+    try {
+        const updatedProduct = await product.save();
+        const formattedProduct = {
+            ...updatedProduct.toObject(),
+            image: getClientImagePath(updatedProduct.image), // Format path
+            images: updatedProduct.images ? updatedProduct.images.map(getClientImagePath).filter(p => p) : [] // Format paths
+        };
+        res.json(formattedProduct);
+    } catch (error) {
+        if (error.code === 11000 || error.name === 'ValidationError') {
+            res.status(400);
+        } else {
+            res.status(500);
+        }
+        console.error("Error updating product:", error);
+        // Cẩn thận khi xóa ảnh MỚI nếu update lỗi
+        if(newMainImageOriginalPath) fs.unlink(getServerFullPath(normalizePathForDB(newMainImageOriginalPath)), (err) => { if(err) console.error("Error deleting new main image on update fail:", err)});
+        newAdditionalImagesOriginalPaths.forEach(p => fs.unlink(getServerFullPath(normalizePathForDB(p)), (err) => { if(err) console.error("Error deleting new additional image on update fail:", err)}));
+
+        throw new Error(`Không thể cập nhật sản phẩm: ${error.message}`);
+    }
 });
 
-// @desc    Delete a product
-// @route   DELETE /api/products/:id
-// @access  Private/Admin
+
+// @desc    Delete a product
+// @route   DELETE /api/products/:id
+// @access  Private/Admin
 const deleteProduct = asyncHandler(async (req, res) => {
-    const product = await Product.findById(req.params.id);
+    const product = await Product.findById(req.params.id);
 
-    if (product) {
-        const originalImagePath = product.image;
-        const originalImagePaths = product.images || []; // Ensure it's an array
+    if (product) {
+        // Xóa ảnh chính
+        if (product.image) {
+            const mainImageServerPath = getServerFullPath(product.image);
+            if (mainImageServerPath) {
+               fs.unlink(mainImageServerPath, (err) => { if(err) console.error(`Error deleting main image for ${product._id}:`, err)});
+            }
+        }
+        // Xóa ảnh phụ
+        if (product.images && product.images.length > 0) {
+            product.images.forEach(imgPath => {
+                const addImageServerPath = getServerFullPath(imgPath);
+                if (addImageServerPath) {
+                   fs.unlink(addImageServerPath, (err) => { if(err) console.error(`Error deleting additional image ${imgPath} for ${product._id}:`, err)});
+                }
+            });
+        }
 
-        // Attempt to delete the main image file
-        if (originalImagePath) {
-            const imageFullPath = getServerFullPath(originalImagePath);
-            if (imageFullPath) {
-                fs.unlink(imageFullPath, (err) => {
-                    if (err && err.code !== 'ENOENT')
-                        console.error(`Lỗi khi xóa ảnh đại diện ${originalImagePath} của sản phẩm bị xóa:`, err);
-                });
-            }
-        }
+        try {
+             await product.deleteOne();
+             res.json({ message: 'Sản phẩm đã được xóa' });
+        } catch(error) {
+             console.error(`Error deleting product document ${req.params.id}:`, error);
+             res.status(500);
+             throw new Error('Lỗi máy chủ khi xóa sản phẩm.');
+        }
 
-        // Attempt to delete additional image files
-        if (originalImagePaths.length > 0) {
-            originalImagePaths.forEach((imgPath) => {
-                const additionalImageFullPath = getServerFullPath(imgPath);
-                if (additionalImageFullPath) {
-                    fs.unlink(additionalImageFullPath, (err) => {
-                        if (err && err.code !== 'ENOENT')
-                            console.error(`Lỗi khi xóa ảnh phụ ${imgPath} của sản phẩm bị xóa:`, err);
-                    });
-                }
-            });
-        }
-
-        // Delete the product document from the database
-        await product.deleteOne(); // Use deleteOne() on the document instance
-        res.json({ message: 'Sản phẩm đã được xóa thành công' });
-    } else {
-        res.status(404);
-        throw new Error('Sản phẩm không tồn tại');
-    }
+    } else {
+        res.status(404);
+        throw new Error('Sản phẩm không tồn tại');
+    }
 });
 
 
-// @desc    Create new review
-// @route   POST /api/products/:id/reviews
-// @access  Private (Logged in users)
+// @desc    Create new review
+// @route   POST /api/products/:id/reviews
+// @access  Private
 const createProductReview = asyncHandler(async (req, res) => {
-    const { rating, comment } = req.body;
-    const productId = req.params.id;
+    const { rating, comment } = req.body;
+    const productId = req.params.id;
 
-    // Basic validation
-    if (rating === undefined || rating === null) {
-        res.status(400);
-        throw new Error('Đánh giá (số sao) là bắt buộc');
-    }
-    const numericRating = Number(rating);
-    if (isNaN(numericRating) || numericRating < 1 || numericRating > 5) {
-        res.status(400);
-        throw new Error('Đánh giá phải là số từ 1 đến 5');
-    }
+    if (!rating || !comment) {
+         res.status(400);
+         throw new Error('Vui lòng cung cấp cả đánh giá (sao) và bình luận.');
+    }
+     const numericRating = Number(rating);
+     if (isNaN(numericRating) || numericRating < 1 || numericRating > 5) {
+         res.status(400);
+         throw new Error('Đánh giá phải là số từ 1 đến 5.');
+     }
 
-    const product = await Product.findById(productId);
 
-    if (product) {
-        // Check if the user has already reviewed this product
-        const alreadyReviewed = product.reviews.find(
-            (r) => r.user.toString() === req.user._id.toString() // Compare user IDs
-        );
+    const product = await Product.findById(productId);
 
-        if (alreadyReviewed) {
-            res.status(400);
-            throw new Error('Bạn đã đánh giá sản phẩm này rồi');
-        }
+    if (product) {
+        const alreadyReviewed = product.reviews.find(
+            (r) => r.user.toString() === req.user._id.toString()
+        );
 
-        // TODO: Optional - Check if the user has purchased this product before allowing review
-        // This would require linking to an Order model
+        if (alreadyReviewed) {
+            res.status(400);
+            throw new Error('Bạn đã đánh giá sản phẩm này rồi.');
+        }
 
-        // Create the review object
-        const review = {
-            name: req.user.name, // User's name from logged-in user
-            rating: numericRating,
-            comment: comment || '', // Optional comment
-            user: req.user._id, // Link to the user ID
-        };
+        const review = {
+            name: req.user.name,
+            rating: numericRating,
+            comment,
+            user: req.user._id,
+        };
 
-        // Add the review to the product's reviews array
-        product.reviews.push(review);
+        product.reviews.push(review);
+        product.numReviews = product.reviews.length;
+        product.rating =
+            product.reviews.reduce((acc, item) => item.rating + acc, 0) /
+            product.reviews.length;
 
-        // Update the number of reviews and the average rating
-        product.numReviews = product.reviews.length;
-        product.rating =
-            product.reviews.reduce((acc, item) => item.rating + acc, 0) / product.reviews.length;
-
-        // Save the product with the new review
-        await product.save();
-        res.status(201).json({ message: 'Thêm đánh giá thành công' });
-    } else {
-        res.status(404);
-        throw new Error('Sản phẩm không tồn tại');
-    }
+        await product.save();
+        res.status(201).json({ message: 'Đánh giá đã được thêm' });
+    } else {
+        res.status(404);
+        throw new Error('Sản phẩm không tồn tại');
+    }
 });
 
 
-// @desc    Get top rated products
-// @route   GET /api/products/top
-// @access  Public
+// @desc    Get top rated products
+// @route   GET /api/products/top
+// @access  Public
 const getTopProducts = asyncHandler(async (req, res) => {
-    await disableExpiredFlashSales(); // Ensure flash sale status is up-to-date
+    await disableExpiredFlashSales();
 
-    // Find top 5 products sorted by rating descending
-    const topProductsFromDB = await Product.find({})
-        .sort({ rating: -1 }) // Sort by rating descending
-        .limit(5) // Limit to 5 products
-        .select('name slug price image rating numReviews isFlashSale saleStartDate saleEndDate discountPercentage'); // Select necessary fields
+    const productsFromDB = await Product.find({ countInStock: { $gt: 0 } })
+                            .sort({ rating: -1 })
+                            .limit(4)
+                            .populate('category', 'slug');
 
-    // Format products for the client
-    const topProducts = topProductsFromDB.map((prod) => {
-        const prodObj = prod.toObject();
-        const isActiveFlashSale =
-            prod.isFlashSale &&
-            prod.saleStartDate <= new Date() &&
-            prod.saleEndDate >= new Date();
-        const discountedPrice = isActiveFlashSale
-            ? prod.price * (1 - prod.discountPercentage / 100)
-            : prod.price;
+     const products = productsFromDB.map((product) => {
+        const productObj = product.toObject();
+        const isActiveFlashSale = product.isFlashSale && product.saleStartDate <= new Date() && product.saleEndDate >= new Date();
+        const discountedPrice = isActiveFlashSale ? product.price * (1 - product.discountPercentage / 100) : product.price;
+        return {
+            _id: productObj._id,
+            name: productObj.name,
+            slug: productObj.slug,
+            image: getClientImagePath(product.image), // Format path
+            price: productObj.price,
+            rating: productObj.rating,
+            numReviews: productObj.numReviews,
+            categorySlug: productObj.category?.slug,
+            discountedPrice: isActiveFlashSale ? discountedPrice : null,
+            isActiveFlashSale,
+        };
+     });
 
-        return {
-            ...prodObj,
-            image: getClientImagePath(prod.image),
-            discount: prod.discountPercentage,
-            discountedPrice: isActiveFlashSale ? discountedPrice : null,
-            isActiveFlashSale,
-        };
-    });
-
-    res.json(topProducts);
+    res.json(products);
 });
 
 
-// Export all controller functions
+// @desc    Search products based on keyword from header search
+// @route   GET /api/products/search
+// @access  Public
+const searchProducts = asyncHandler(async (req, res) => {
+    await disableExpiredFlashSales();
+
+    const keyword = req.query.keyword ? req.query.keyword.trim() : '';
+
+    if (!keyword) {
+        return res.json({ products: [] });
+    }
+
+    const searchFilter = {
+        name: {
+            $regex: keyword,
+            $options: 'i',
+        },
+    };
+
+    try {
+        const productsFromDB = await Product.find(searchFilter)
+            .populate('category', 'id name slug')
+            .limit(50)
+            .sort({ createdAt: -1 });
+
+         const products = productsFromDB.map((product) => {
+            const productObj = product.toObject();
+            const isActiveFlashSale =
+                product.isFlashSale &&
+                product.saleStartDate <= new Date() &&
+                product.saleEndDate >= new Date();
+            const discountedPrice = isActiveFlashSale
+                ? product.price * (1 - product.discountPercentage / 100)
+                : product.price;
+
+            return {
+                ...productObj,
+                image: getClientImagePath(product.image), // Format path
+                images: product.images
+                    ? product.images.map((imgPath) => getClientImagePath(imgPath)).filter((p) => p)
+                    : [],
+                category: productObj.category,
+                discount: product.discountPercentage,
+                discountedPrice: isActiveFlashSale ? discountedPrice : null,
+                isActiveFlashSale,
+            };
+         });
+
+        res.json({ products });
+
+    } catch (error) {
+        console.error('Error during product search:', error);
+        res.status(500).json({ message: 'Lỗi máy chủ khi tìm kiếm sản phẩm.' });
+    }
+});
+
+
+// --- Exports ---
 export {
-    getProducts,
-    getProductByIdOrSlug,
-    createProduct,
-    updateProduct,
-    deleteProduct,
-    createProductReview,
-    getTopProducts,
-    getProductSuggestions, // <--- Export the new function
+    getProducts,
+    getProductByIdOrSlug,
+    createProduct,
+    updateProduct,
+    deleteProduct,
+    createProductReview,
+    getTopProducts,
+    getProductSuggestions,
+    searchProducts,
+    getClientImagePath, // Thêm export này
+    normalizePathForDB, // Và export này
 };

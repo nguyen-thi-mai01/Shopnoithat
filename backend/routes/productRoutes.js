@@ -8,98 +8,90 @@ import {
     deleteProduct,
     createProductReview,
     getTopProducts,
-    getProductSuggestions // <--- Import the new controller function
+    getProductSuggestions,
+    searchProducts // <<<=== IMPORT HÀM SEARCH MỚI
 } from '../controllers/productController.js';
 import { protect, admin } from '../middleware/authMiddleware.js';
-import upload from '../middleware/uploadMiddleware.js'; // Assuming this handles file uploads correctly
-import Product from '../models/productModel.js'; // Used only for the middleware below
+import upload from '../middleware/uploadMiddleware.js'; // Middleware upload của bạn
+import Product from '../models/productModel.js'; // Chỉ dùng cho middleware check flash sale
 
 const router = express.Router();
 
-// Middleware to check and disable expired Flash Sales (can be applied selectively)
-// Consider if this check is needed on every product route or can be run periodically
+// Middleware to check and disable expired Flash Sales
 const checkFlashSaleStatus = async (req, res, next) => {
     try {
-        // Logic to disable expired flash sales
+        const now = new Date();
         await Product.updateMany(
-            {
-                isFlashSale: true,
-                saleEndDate: { $lt: new Date() },
-            },
+            { isFlashSale: true, saleEndDate: { $lt: now } },
             {
                 $set: {
-                    isFlashSale: false,
-                    discountPercentage: 0,
-                    saleStartDate: null,
-                    saleEndDate: null,
-                    // Optionally reset slots too, depending on logic
-                    // totalFlashSaleSlots: 0,
-                    // remainingFlashSaleSlots: 0,
+                    isFlashSale: false, discountPercentage: 0, saleStartDate: null, saleEndDate: null,
+                    totalFlashSaleSlots: 0, remainingFlashSaleSlots: 0, // Reset slots
                 },
             }
         );
-        next(); // Proceed to the next middleware or route handler
+        next();
     } catch (error) {
         console.error('Middleware Error checking Flash Sale status:', error);
-        // Decide if you want to block the request or just log the error
-        // For robustness, maybe just log and continue
-        next();
-        // Or send an error response:
-        // res.status(500).json({ message: 'Server error checking Flash Sale status', error: error.message });
+        next(); // Log lỗi và tiếp tục
     }
 };
 
-// --- NEW ROUTE FOR SUGGESTIONS ---
-// Needs to be defined *before* routes with parameters like /:idOrSlug
-router.get('/suggestions', getProductSuggestions); // Public route for suggestions
-// --- END NEW ROUTE ---
+// --- Public GET Routes ---
+// Đặt các route không có tham số động lên trước
 
-// Routes for getting products (Public)
+router.get('/suggestions', getProductSuggestions); // Lấy gợi ý sản phẩm
+
+router.get('/search', searchProducts); // <<<=== ROUTE TÌM KIẾM SẢN PHẨM TỪ HEADER
+
+router.get('/top', checkFlashSaleStatus, getTopProducts); // Lấy top sản phẩm
+
+// Route lấy danh sách sản phẩm (có thể có filter/pagination)
+// Áp dụng middleware check flash sale cho route này
 router.route('/')
-    .get(checkFlashSaleStatus, getProducts); // Get list of products (apply flash sale check)
+    .get(checkFlashSaleStatus, getProducts);
 
-router.get('/top', checkFlashSaleStatus, getTopProducts); // Get top products (apply flash sale check)
-
-// Route for getting a single product by ID or Slug (Public)
-// This needs to be defined *after* specific routes like /suggestions and /top
+// Route lấy chi tiết sản phẩm bằng ID hoặc Slug (đặt sau các route cụ thể)
+// Áp dụng middleware check flash sale cho route này
 router.route('/:idOrSlug')
-    .get(checkFlashSaleStatus, getProductByIdOrSlug); // Get single product (apply flash sale check)
+    .get(checkFlashSaleStatus, getProductByIdOrSlug);
 
 
-// --- Admin Routes ---
+// --- Admin Routes (Protected & Admin Role Required) ---
 
-// Create a new product (Admin only)
-router.route('/')
+// Tạo sản phẩm mới (Admin) - POST đến /api/products
+router.route('/') // Trùng path với GET nhưng khác method
     .post(
-        protect, // Must be logged in
-        admin,   // Must be an admin
-        // Multer middleware for handling 'image' and 'images' fields
+        protect,
+        admin,
+        // Middleware Multer để xử lý upload file ảnh
         upload.fields([
-            { name: 'image', maxCount: 1 },  // Single main image
-            { name: 'images', maxCount: 5 } // Up to 5 additional images
+            { name: 'image', maxCount: 1 },   // Ảnh chính
+            { name: 'images', maxCount: 5 }  // Ảnh phụ (tối đa 5)
         ]),
-        createProduct // Controller function
+        createProduct
     );
 
-// Update and Delete specific product by ID (Admin only)
+// Cập nhật và Xóa sản phẩm bằng ID (Admin) - PUT & DELETE đến /api/products/:id
 router.route('/:id')
     .put(
         protect,
         admin,
-        upload.fields([ // Handle potential image updates
+        // Middleware Multer cũng cần ở đây để xử lý cập nhật ảnh
+        upload.fields([
             { name: 'image', maxCount: 1 },
             { name: 'images', maxCount: 5 }
         ]),
         updateProduct
     )
-    .delete(protect, admin, deleteProduct); // Delete product
+    .delete(protect, admin, deleteProduct);
 
 
-// --- User Routes ---
+// --- User Routes (Protected) ---
 
-// Create a product review (Logged in users only)
+// Tạo đánh giá sản phẩm (User đã đăng nhập) - POST đến /api/products/:id/reviews
 router.route('/:id/reviews')
-    .post(protect, createProductReview); // Only needs user to be logged in
+    .post(protect, createProductReview);
 
 
 export default router;
